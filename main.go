@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -23,6 +24,8 @@ var (
 	countryCodeFile = flag.String("country", "", "Path to the country code file")
 	ipv4File        = flag.String("ipv4", "", "Path to the IPv4 block file")
 	ipv6File        = flag.String("ipv6", "", "Path to the IPv6 block file")
+	awsFile         = flag.String("aws", "", "Path to the aws ip-ranges file")
+	azureFile       = flag.String("azure", "", "Path to the azure ip-ranges file")
 )
 
 func getCountryCodeMap() (map[string]string, error) {
@@ -79,6 +82,8 @@ func getCidrPerCountry(file string, m map[string]string, list map[string][]*rout
 func main() {
 	flag.Parse()
 
+	cloudGeoip()
+
 	ccMap, err := getCountryCodeMap()
 	if err != nil {
 		fmt.Println("Error reading country code map:", err)
@@ -110,6 +115,21 @@ func main() {
 	}
 
 	if err := ioutil.WriteFile("geoip.dat", geoIPBytes, 0777); err != nil {
+		fmt.Println("Error writing geoip to file:", err)
+	}
+}
+
+func cloudGeoip() {
+	geoIPList := new(router.GeoIPList)
+	geoIPList.Entry = append(geoIPList.Entry, getAwsIPs())
+	geoIPList.Entry = append(geoIPList.Entry, getAzureIPs())
+
+	geoIPBytes, err := proto.Marshal(geoIPList)
+	if err != nil {
+		fmt.Println("Error marshalling geoip list:", err)
+	}
+
+	if err := ioutil.WriteFile("cloudgeoip.dat", geoIPBytes, 0777); err != nil {
 		fmt.Println("Error writing geoip to file:", err)
 	}
 }
@@ -147,6 +167,105 @@ func getLocalIPs() *router.GeoIP {
 	}
 	return &router.GeoIP{
 		CountryCode: "PRIVATE",
+		Cidr:        cidr,
+	}
+}
+
+type AwsIPRange struct {
+	SyncToken    string          `json:"syncToken"`
+	CreateDate   string          `json:"createDate"`
+	Ipv4Prefixes []AwsIPv4Prefix `json:"prefixes"`
+	Ipv6Prefixes []AwsIPv6Prefix `json:"ipv_6_prefixes"`
+}
+
+type AwsIPv4Prefix struct {
+	IpPrefix           string `json:"ip_prefix"`
+	Region             string `json:"region"`
+	Service            string `json:"service"`
+	NetworkBorderGroup string `json:"network_border_group"`
+}
+
+type AwsIPv6Prefix struct {
+	IpPrefix           string `json:"ipv6_prefix"`
+	Region             string `json:"region"`
+	Service            string `json:"service"`
+	NetworkBorderGroup string `json:"network_border_group"`
+}
+
+func getAwsIPs() *router.GeoIP {
+	bytes, err := ioutil.ReadFile(*awsFile)
+	if err != nil {
+		panic(err)
+	}
+
+	awsIPRange := AwsIPRange{}
+	err = json.Unmarshal(bytes, &awsIPRange)
+	if err != nil {
+		panic(err)
+	}
+
+	cidr := make([]*router.CIDR, 0)
+	for _, item := range awsIPRange.Ipv4Prefixes {
+		c, err := conf.ParseIP(item.IpPrefix)
+		common.Must(err)
+		cidr = append(cidr, c)
+	}
+	for _, item := range awsIPRange.Ipv6Prefixes {
+		c, err := conf.ParseIP(item.IpPrefix)
+		common.Must(err)
+		cidr = append(cidr, c)
+	}
+
+	return &router.GeoIP{
+		CountryCode: "AWS",
+		Cidr:        cidr,
+	}
+}
+
+type AzureIPRange struct {
+	ChangeNumber int                 `json:"changeNumber"`
+	Cloud        string              `json:"cloud"`
+	Values       []AzureIPRangeValue `json:"values"`
+}
+
+type AzureIPRangeValue struct {
+	Name       string               `json:"name"`
+	Id         string               `json:"id"`
+	Properties AzureIPRangeProperty `json:"properties"`
+}
+
+type AzureIPRangeProperty struct {
+	ChangeNumber    int      `json:"changeNumber"`
+	Region          string   `json:"region"`
+	Platform        string   `json:"platform"`
+	SystemService   string   `json:"systemService"`
+	AddressPrefixes []string `json:"addressprefixes"`
+}
+
+func getAzureIPs() *router.GeoIP {
+	bytes, err := ioutil.ReadFile(*azureFile)
+	if err != nil {
+		panic(err)
+	}
+
+	azureIPRange := AzureIPRange{}
+	err = json.Unmarshal(bytes, &azureIPRange)
+	if err != nil {
+		panic(err)
+	}
+
+	cidr := make([]*router.CIDR, 0)
+
+	for _, value := range azureIPRange.Values {
+		for _, ip := range value.Properties.AddressPrefixes {
+			c, err := conf.ParseIP(ip)
+			common.Must(err)
+			cidr = append(cidr, c)
+		}
+	}
+
+	return &router.GeoIP{
+		CountryCode: "AZURE",
 		Cidr:        cidr,
 	}
 }
